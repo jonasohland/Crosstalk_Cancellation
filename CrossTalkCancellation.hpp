@@ -10,6 +10,7 @@
 
 #include <vector>
 
+template <typename SampleType>
 class CrossTalkCancellation {
 public:
     CrossTalkCancellation() {
@@ -20,77 +21,97 @@ public:
         headshadow_filter_coefficients(compute_geometry(), ear_to_ear/2.0);
 
         // init left queue
-        left_queue.resize(4);
-        left_queue[0].resize(512, 0.0);
-        left_queue[1].resize(512, 0.0);
-        left_queue[2].resize(512, 0.0);
-        left_queue[3].resize(512, 0.0);
-
-        // init right queue
-        right_queue.resize(4);
-        right_queue[0].resize(512, 0.0);
-        right_queue[1].resize(512, 0.0);
-        right_queue[2].resize(512, 0.0);
-        right_queue[3].resize(512, 0.0);
+        for (int i = 0; i < 4; ++i) {
+            left_queue.push_back(std::make_unique<std::vector<SampleType>>());
+            left_queue[i]->resize(512, 0.0);
+            right_queue.push_back(std::make_unique<std::vector<SampleType>>());
+            right_queue[i]->resize(512, 0.0);
+        }
     }
     
-    void change_sample_rate(const int _sr) {
+    void enable()
+    {
+        enabled = true;
+    }
+    
+    void disable()
+    {
+        enabled = false;
+    }
+    
+    void set_blocksize(int size) {
+        left_queue.clear();
+        right_queue.clear();
+        for (int i = 0; i < 4; ++i) {
+            left_queue.push_back(std::make_unique<std::vector<SampleType>>());
+            left_queue[i]->resize(size, 0.0);
+            right_queue.push_back(std::make_unique<std::vector<SampleType>>());
+            right_queue[i]->resize(size, 0.0);
+        }
+    }
+    
+    void recalc_filters()
+    {
+        headshadow_filter_coefficients(compute_geometry(), ear_to_ear/2.0);
+    }
+    
+    void set_samplerate(const int _sr) {
         sr = _sr;
-        headshadow_filter_coefficients(compute_geometry(), ear_to_ear/2.0);
     }
     
-    void change_speaker_to_speaker(const double _spkr_to_spkr) {
-        spkr_to_spkr = _spkr_to_spkr;
-        headshadow_filter_coefficients(compute_geometry(), ear_to_ear/2.0);
+    void set_speaker_distance(const SampleType dist) {
+        spkr_to_spkr = dist;
+        
     }
     
-    void change_listener_to_speaker(const double _lstnr_to_spkr) {
-        lstnr_to_spkr = _lstnr_to_spkr;
-        headshadow_filter_coefficients(compute_geometry(), ear_to_ear/2.0);
+    void set_listener_distance(const SampleType dist) {
+        lstnr_to_spkr = dist;
     }
     
-    void change_ear_to_ear(const double _ear_to_ear) {
-        ear_to_ear = _ear_to_ear;
-        headshadow_filter_coefficients(compute_geometry(), ear_to_ear/2.0);
+    void set_ear_distance(const SampleType dist) {
+        ear_to_ear = dist;
     }
     
-    void process_stereo_channel(std::vector<double>& left,
-                                std::vector<double>& right) {
+    void process_stereo_channel(SampleType* left, SampleType* right, std::size_t samples) {
+        
+        if (!enabled)
+            return;
+        
         // move old data pieces forward
-        left_queue[0] = left_queue[1];
-        left_queue[1] = left_queue[2];
-        left_queue[2] = left_queue[3];
+        left_queue[0] = std::move(left_queue[1]);
+        left_queue[1] = std::move(left_queue[2]);
+        left_queue[2] = std::move(left_queue[3]);
         // queue new data piece
-        left_queue[3] = left;
+        left_queue[3] = std::make_unique<std::vector<SampleType>>(left, left + samples);
 
         // move old data pieces forward
-        right_queue[0] = right_queue[1];
-        right_queue[1] = right_queue[2];
-        right_queue[2] = right_queue[3];
+        right_queue[0] = std::move(right_queue[1]);
+        right_queue[1] = std::move(right_queue[2]);
+        right_queue[2] = std::move(right_queue[3]);
         // queue new data piece
-        right_queue[3] = right;
+        right_queue[3] = std::make_unique<std::vector<SampleType>>(right, right + samples);
 
         // concatenate data pieces to one big data piece
-        std::vector<double> work_left;
-        work_left.insert(work_left.end(), left_queue[0].begin(), left_queue[0].end());
-        work_left.insert(work_left.end(), left_queue[1].begin(), left_queue[1].end());
-        work_left.insert(work_left.end(), left_queue[2].begin(), left_queue[2].end());
-        work_left.insert(work_left.end(), left_queue[3].begin(), left_queue[3].end());
+        std::vector<SampleType> work_left;
+        work_left.insert(work_left.end(), left_queue[0]->begin(), left_queue[0]->end());
+        work_left.insert(work_left.end(), left_queue[1]->begin(), left_queue[1]->end());
+        work_left.insert(work_left.end(), left_queue[2]->begin(), left_queue[2]->end());
+        work_left.insert(work_left.end(), left_queue[3]->begin(), left_queue[3]->end());
 
-        std::vector<double> work_right;
-        work_right.insert(work_right.end(), right_queue[0].begin(), right_queue[0].end());
-        work_right.insert(work_right.end(), right_queue[1].begin(), right_queue[1].end());
-        work_right.insert(work_right.end(), right_queue[2].begin(), right_queue[2].end());
-        work_right.insert(work_right.end(), right_queue[3].begin(), right_queue[3].end());
+        std::vector<SampleType> work_right;
+        work_right.insert(work_right.end(), right_queue[0]->begin(), right_queue[0]->end());
+        work_right.insert(work_right.end(), right_queue[1]->begin(), right_queue[1]->end());
+        work_right.insert(work_right.end(), right_queue[2]->begin(), right_queue[2]->end());
+        work_right.insert(work_right.end(), right_queue[3]->begin(), right_queue[3]->end());
 
         // calculate crosstalk cancellation for left channel
-        std::vector<double> l_left, l_right;
+        std::vector<SampleType> l_left, l_right;
         l_left.resize(work_left.size(), 0.0);
         l_right.resize(work_left.size(), 0.0);
         cancel_crosstalk(work_left, l_left, l_right);
         
         // calculate crosstalk cancellation for right channel
-        std::vector<double> r_right, r_left;
+        std::vector<SampleType> r_right, r_left;
         r_right.resize(work_right.size(), 0.0);
         r_left.resize(work_right.size(), 0.0);
         cancel_crosstalk(work_right, r_right, r_left);
@@ -104,14 +125,16 @@ public:
         add_to_signal(work_right, l_right);
         
         // store the third data piece as the result
-        left.resize(left_queue[2].size());
-        memcpy(left.data(),
-               work_left.data() + left_queue[0].size() + left_queue[1].size(),
-               left_queue[2].size() * sizeof(double));
-        right.resize(right_queue[2].size());
-        memcpy(right.data(),
-               work_right.data() + right_queue[0].size() + right_queue[1].size(),
-               right_queue[2].size() * sizeof(double));
+        
+        std::size_t data_size = (left_queue[2]->size() < samples) ? left_queue[2]->size() : samples;
+       
+        memcpy(left,
+               work_left.data() + left_queue[0]->size() + left_queue[1]->size(),
+               data_size * sizeof(SampleType));
+        
+        memcpy(right,
+               work_right.data() + right_queue[0]->size() + right_queue[1]->size(),
+               data_size * sizeof(SampleType));
     }
 private:
     /******************************************************************************
@@ -121,25 +144,25 @@ private:
      a[i] are the feedback filter coefficients.
      *****************************************************************************/
     struct HeadShadow {
-        double b[2];
-        double a[2];
+        SampleType b[2];
+        SampleType a[2];
     };
     
     
-    void cancel_crosstalk(const std::vector<double>& signal,
-                          std::vector<double>& ipsilateral,
-                          std::vector<double>& contralateral) {
-        double c = 343.2;
-        double delta_d = abs(d2 - d1);
-        double time_delay = delta_d / c;
-        double attenuation = d1 / d2;
+    void cancel_crosstalk(const std::vector<SampleType>& signal,
+                          std::vector<SampleType>& ipsilateral,
+                          std::vector<SampleType>& contralateral) {
+        SampleType c = 343.2;
+        SampleType delta_d = abs(d2 - d1);
+        SampleType time_delay = delta_d / c;
+        SampleType attenuation = d1 / d2;
         // Reference max amplitude
-        double ref = max_of_abs(signal);
+        SampleType ref = max_of_abs(signal);
         recursive_cancel(signal, ipsilateral, contralateral, ref, time_delay, attenuation);
     }
     
-    inline void add_to_signal(std::vector<double>& signal,
-                       const std::vector<double>& signal2) {
+    inline void add_to_signal(std::vector<SampleType>& signal,
+                       const std::vector<SampleType>& signal2) {
         for (int i=0; i<static_cast<int>(signal.size()); i++) {
             signal[i] += signal2[i];
         }
@@ -160,17 +183,17 @@ private:
      
      The formula has initial condition issues, so I use naive method instead.
      *****************************************************************************/
-    inline void fractional_delay(std::vector<double>& signal,
-                          double time) {
-        std::vector<double> temp_signal(signal.size());
-        double m = time * sr;
+    inline void fractional_delay(std::vector<SampleType>& signal,
+                          SampleType time) {
+        std::vector<SampleType> temp_signal(signal.size());
+        SampleType m = time * sr;
         int m_int = floor(m);
-        double m_frac = m - m_int;
+        SampleType m_frac = m - m_int;
         for (int i=0; i<static_cast<int>(temp_signal.size()); i++) {
             int index_low = i - (m_int + 1);
             int index_high = i - m_int;
-            double low = (index_low >= 0 ? signal[index_low] : 0.0);
-            double high = (index_high >= 0 ? signal[index_high] : 0.0);
+            SampleType low = (index_low >= 0 ? signal[index_low] : 0.0);
+            SampleType high = (index_high >= 0 ? signal[index_high] : 0.0);
             temp_signal[i] = high + (low - high) * m_frac;
         }
         signal = temp_signal;
@@ -184,9 +207,9 @@ private:
      To simplify the caculation, I let y[0] = x[0], though this method has initial
      condition issue, I use padding data at both head and tail to avoid the issue.
      *****************************************************************************/
-    inline void filtfilt(std::vector<double>& signal) {
+    inline void filtfilt(std::vector<SampleType>& signal) {
         if (signal.size() > 1) {
-            std::vector<double> temp_signal;
+            std::vector<SampleType> temp_signal;
             // from left to right
             temp_signal = signal;
             for (int i=1; i<static_cast<int>(signal.size()); i++) {
@@ -205,7 +228,7 @@ private:
         }
     }
     
-    inline void attenuate(std::vector<double>& signal, const double attenuation) {
+    inline void attenuate(std::vector<SampleType>& signal, const SampleType attenuation) {
         for (int i=0; i<static_cast<int>(signal.size()); i++) {
             signal[i] *= attenuation;
         }
@@ -215,16 +238,16 @@ private:
      To speed up calculation and optimize memory, I use loop instead of recursive,
      accumulate crosstalk cancellation to each channel in turn.
      *****************************************************************************/
-    void recursive_cancel(const std::vector<double>& signal,
-                          std::vector<double>& ipsilateral,
-                          std::vector<double>& contralateral,
-                          const double ref,
-                          const double time,
-                          const double attenuation,
-                          const double threshold_db = -70.0) {
-        std::vector<double> temp_signal = signal;
+    void recursive_cancel(const std::vector<SampleType>& signal,
+                          std::vector<SampleType>& ipsilateral,
+                          std::vector<SampleType>& contralateral,
+                          const SampleType ref,
+                          const SampleType time,
+                          const SampleType attenuation,
+                          const SampleType threshold_db = -70.0) {
+        std::vector<SampleType> temp_signal = signal;
         bool ping_pong = false;
-        double db;
+        SampleType db;
         do {
             // time delay by linear interpolation
             fractional_delay(temp_signal, time);
@@ -250,10 +273,10 @@ private:
         } while (db >= threshold_db);
     }
     
-    inline double max_of_abs(const std::vector<double>& signal) {
-        double max_abs_x = 0.0;
+    inline SampleType max_of_abs(const std::vector<SampleType>& signal) {
+        SampleType max_abs_x = 0.0;
         for (int i=0; i<static_cast<int>(signal.size()); i++) {
-            double abs_x = std::abs(signal[i]);
+            SampleType abs_x = std::abs(signal[i]);
             if (abs_x > max_abs_x) {
                 max_abs_x = abs_x;
             }
@@ -261,14 +284,14 @@ private:
         return max_abs_x;
     }
     
-    void headshadow_filter_coefficients(const double _theta,
-                                        const double r) {
-        double theta = _theta + M_PI / 2.0;
-        double theta0 = 2.618;
-        double alpha_min = 0.5;
-        double c = 343.2;
-        double w0 = c / r;
-        double alpha = 1 + alpha_min / 2.0 + (1.0 - alpha_min / 2.0) * cos(theta * M_PI / theta0);
+    void headshadow_filter_coefficients(const SampleType _theta,
+                                        const SampleType r) {
+        SampleType theta = _theta + M_PI / 2.0;
+        SampleType theta0 = 2.618;
+        SampleType alpha_min = 0.5;
+        SampleType c = 343.2;
+        SampleType w0 = c / r;
+        SampleType alpha = 1 + alpha_min / 2.0 + (1.0 - alpha_min / 2.0) * cos(theta * M_PI / theta0);
         
         headshadow.b[0] = (alpha + w0 / sr) / (1 + w0 / sr);
         headshadow.b[1] = (-alpha + w0 / sr) / (1 + w0 / sr);
@@ -276,12 +299,12 @@ private:
         headshadow.a[1] = -(1 - w0 / sr) / (1 + w0 / sr);
     }
     
-    double compute_geometry() {
-        double S = spkr_to_spkr / 2.0;
-        double L = lstnr_to_spkr;
-        double r = ear_to_ear / 2.0;
-        double theta = acos(S / (sqrt(L * L + S * S)));
-        double delta_d = r * (M_PI - 2.0 * theta);
+    SampleType compute_geometry() {
+        SampleType S = spkr_to_spkr / 2.0;
+        SampleType L = lstnr_to_spkr;
+        SampleType r = ear_to_ear / 2.0;
+        SampleType theta = acos(S / (sqrt(L * L + S * S)));
+        SampleType delta_d = r * (M_PI - 2.0 * theta);
         d1 = sqrt(L * L + (S - r) * (S - r));
         d2 = d1 + delta_d;
         
@@ -291,21 +314,23 @@ private:
         return theta;
     }
     
-    inline void invert(std::vector<double>& signal) {
+    inline void invert(std::vector<SampleType>& signal) {
         for (int i=0; i<static_cast<int>(signal.size()); i++) {
             signal[i] = -signal[i];
         }
     }
     
-    double d1;
-    double d2;
+    bool enabled = true;
+    
+    SampleType d1;
+    SampleType d2;
     HeadShadow headshadow;
-    double spkr_to_spkr;
-    double lstnr_to_spkr;
-    double ear_to_ear;
+    SampleType spkr_to_spkr;
+    SampleType lstnr_to_spkr;
+    SampleType ear_to_ear;
     int sr;
-    std::vector< std::vector<double> > left_queue;
-    std::vector< std::vector<double> > right_queue;
+    std::vector< std::unique_ptr<std::vector<SampleType>> > left_queue;
+    std::vector< std::unique_ptr<std::vector<SampleType>> > right_queue;
 };
 
 #endif /* CrossTalkCancellation_hpp */
