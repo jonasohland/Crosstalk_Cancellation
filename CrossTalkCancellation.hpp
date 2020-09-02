@@ -42,12 +42,15 @@ public:
     void set_blocksize(int size) {
         left_queue.clear();
         right_queue.clear();
+        filterbuf.resize(size * 4);
+        cancel_buf.resize(size * 4);
         for (int i = 0; i < 4; ++i) {
             left_queue.push_back(std::make_unique<std::vector<SampleType>>());
             left_queue[i]->resize(size, 0.0);
             right_queue.push_back(std::make_unique<std::vector<SampleType>>());
             right_queue[i]->resize(size, 0.0);
         }
+        internal_buffers_size = size;
     }
     
     void recalc_filters()
@@ -72,24 +75,42 @@ public:
         ear_to_ear = dist;
     }
     
+    std::pair<double, double> avg_passes() {
+        
+        std::size_t temp_l = pass_cnt_l;
+        std::size_t temp_r = pass_cnt_r;
+        std::size_t temp_cbs = cb_cnt || 1;
+        
+        pass_cnt_l = 0;
+        pass_cnt_r = 0;
+        cb_cnt = 0;
+        
+        return { temp_l / temp_cbs, temp_r / temp_cbs };
+    }
+    
     void process_stereo_channel(SampleType* left, SampleType* right, std::size_t samples) {
+        
+        ++cb_cnt;
         
         if (!enabled)
             return;
         
+        if (samples != internal_buffers_size)
+            set_blocksize(samples);
+        
         // move old data pieces forward
-        left_queue[0] = std::move(left_queue[1]);
-        left_queue[1] = std::move(left_queue[2]);
-        left_queue[2] = std::move(left_queue[3]);
+        std::swap(left_queue[0], left_queue[1]);
+        std::swap(left_queue[1], left_queue[2]);
+        std::swap(left_queue[2], left_queue[3]);
         // queue new data piece
-        left_queue[3] = std::make_unique<std::vector<SampleType>>(left, left + samples);
+        std::copy(left, left + samples, left_queue[3]->begin());
 
         // move old data pieces forward
-        right_queue[0] = std::move(right_queue[1]);
-        right_queue[1] = std::move(right_queue[2]);
-        right_queue[2] = std::move(right_queue[3]);
+        std::swap(right_queue[0], right_queue[1]);
+        std::swap(right_queue[1], right_queue[2]);
+        std::swap(right_queue[2], right_queue[3]);
         // queue new data piece
-        right_queue[3] = std::make_unique<std::vector<SampleType>>(right, right + samples);
+        std::copy(right, right + samples, right_queue[3]->begin());
 
         // concatenate data pieces to one big data piece
         std::vector<SampleType> work_left;
@@ -108,13 +129,13 @@ public:
         std::vector<SampleType> l_left, l_right;
         l_left.resize(work_left.size(), 0.0);
         l_right.resize(work_left.size(), 0.0);
-        cancel_crosstalk(work_left, l_left, l_right);
+        cancel_crosstalk(work_left, l_left, l_right, true);
         
         // calculate crosstalk cancellation for right channel
         std::vector<SampleType> r_right, r_left;
         r_right.resize(work_right.size(), 0.0);
         r_left.resize(work_right.size(), 0.0);
-        cancel_crosstalk(work_right, r_right, r_left);
+        cancel_crosstalk(work_right, r_right, r_left, false);
         
         // accumulate crosstalk cancellation to left channel
         add_to_signal(work_left, l_left);
@@ -151,14 +172,14 @@ private:
     
     void cancel_crosstalk(const std::vector<SampleType>& signal,
                           std::vector<SampleType>& ipsilateral,
-                          std::vector<SampleType>& contralateral) {
+                          std::vector<SampleType>& contralateral, bool is_L) {
         SampleType c = 343.2;
         SampleType delta_d = abs(d2 - d1);
         SampleType time_delay = delta_d / c;
         SampleType attenuation = d1 / d2;
         // Reference max amplitude
         SampleType ref = max_of_abs(signal);
-        recursive_cancel(signal, ipsilateral, contralateral, ref, time_delay, attenuation);
+        recursive_cancel(signal, ipsilateral, contralateral, ref, time_delay, attenuation, is_L);
     }
     
     inline void add_to_signal(std::vector<SampleType>& signal,
@@ -168,7 +189,7 @@ private:
         }
     }
     
-    /******************************************************************************
+    /*
                 ----------------        ----------------
                |   M samples    |      |delta fractional|
      y[n] ---> | integer delay  | ---> |      delay     | ---> y[n - M - delta]
@@ -182,21 +203,21 @@ private:
      y[n] = u * x[n] + x[n - 1] - u * y[n - 1] where u = (1 - delta) / (1 + delta)
      
      The formula has initial condition issues, so I use naive method instead.
-     *****************************************************************************/
+     */
     inline void fractional_delay(std::vector<SampleType>& signal,
                           SampleType time) {
-        std::vector<SampleType> temp_signal(signal.size());
+        std::copy(signal.begin(), signal.end(), filterbuf.begin());
         SampleType m = time * sr;
         int m_int = floor(m);
         SampleType m_frac = m - m_int;
-        for (int i=0; i<static_cast<int>(temp_signal.size()); i++) {
+        for (int i=0; i<static_cast<int>(filterbuf.size()); i++) {
             int index_low = i - (m_int + 1);
             int index_high = i - m_int;
             SampleType low = (index_low >= 0 ? signal[index_low] : 0.0);
             SampleType high = (index_high >= 0 ? signal[index_high] : 0.0);
-            temp_signal[i] = high + (low - high) * m_frac;
+            filterbuf[i] = high + (low - high) * m_frac;
         }
-        signal = temp_signal;
+        std::copy(filterbuf.begin(), filterbuf.end(), signal.begin());
     }
     
     /******************************************************************************
@@ -209,20 +230,21 @@ private:
      *****************************************************************************/
     inline void filtfilt(std::vector<SampleType>& signal) {
         if (signal.size() > 1) {
-            std::vector<SampleType> temp_signal;
-            // from left to right
-            temp_signal = signal;
+            
+            std::copy(signal.begin(), signal.end(), filterbuf.begin());
+            
             for (int i=1; i<static_cast<int>(signal.size()); i++) {
-                temp_signal[i] = headshadow.b[0] * signal[i] +
+                filterbuf[i] = headshadow.b[0] * signal[i] +
                 headshadow.b[1] * signal[i-1] -
-                headshadow.a[1] * temp_signal[i-1];
+                headshadow.a[1] * filterbuf[i-1];
             }
             
             // from right to left
-            signal = temp_signal;
+            std::copy(filterbuf.begin(), filterbuf.end(), signal.begin());
+            
             for (int i=static_cast<int>(signal.size())-2; i>=0; i--) {
-                signal[i] = headshadow.b[0] * temp_signal[i] +
-                headshadow.b[1] * temp_signal[i+1] -
+                signal[i] = headshadow.b[0] * filterbuf[i] +
+                headshadow.b[1] * filterbuf[i+1] -
                 headshadow.a[1] * signal[i+1];
             }
         }
@@ -243,34 +265,45 @@ private:
                           std::vector<SampleType>& contralateral,
                           const SampleType ref,
                           const SampleType time,
-                          const SampleType attenuation,
-                          const SampleType threshold_db = -70.0) {
-        std::vector<SampleType> temp_signal = signal;
+                          const SampleType attenuation, bool is_L = true) {
+        
+        std::copy(signal.begin(), signal.end(), cancel_buf.begin());
+        
         bool ping_pong = false;
         SampleType db;
-        do {
+        
+        for (int i = 0; i < 64; ++i) {
             // time delay by linear interpolation
-            fractional_delay(temp_signal, time);
+            fractional_delay(cancel_buf, time);
 
             // invert the delayed signal
-            invert(temp_signal);
+            invert(cancel_buf);
 
             // apply headshadow filter (lowpass based on theta)
-            filtfilt(temp_signal);
+            filtfilt(cancel_buf);
 
             // attenuate the low pass filtered delayed signal
-            attenuate(temp_signal, attenuation);
+            attenuate(cancel_buf, attenuation);
 
             // accumulate signal to either ipsilateral or contralateral
             add_to_signal(ping_pong ? ipsilateral : contralateral,
-                          temp_signal);
+                          cancel_buf);
 
             // Recurse until rms db is below threshold
-            db = 20 * log10(max_of_abs(temp_signal) / ref);
+            db = 20 * log10(max_of_abs(cancel_buf) / ref);
+            
+            if (is_L)
+                pass_cnt_l++;
+            else
+                pass_cnt_r++;
 
             // flip left and right
             ping_pong = !ping_pong;
-        } while (db >= threshold_db);
+            
+            if (db <= -65)
+                break;
+        }
+    
     }
     
     inline SampleType max_of_abs(const std::vector<SampleType>& signal) {
@@ -320,7 +353,13 @@ private:
         }
     }
     
+    std::size_t internal_buffers_size;
+    
     bool enabled = true;
+    
+    std::size_t pass_cnt_l;
+    std::size_t pass_cnt_r;
+    std::size_t cb_cnt;
     
     SampleType d1;
     SampleType d2;
@@ -329,6 +368,8 @@ private:
     SampleType lstnr_to_spkr;
     SampleType ear_to_ear;
     int sr;
+    std::vector<SampleType> filterbuf;
+    std::vector<SampleType> cancel_buf;
     std::vector< std::unique_ptr<std::vector<SampleType>> > left_queue;
     std::vector< std::unique_ptr<std::vector<SampleType>> > right_queue;
 };
